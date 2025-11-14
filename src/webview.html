@@ -1,118 +1,295 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta http-equiv="Content-Security-Policy" content="
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
         style-src {{csp_source}} 'unsafe-inline';
         script-src 'nonce-{{nonce}}' 'unsafe-eval';
         worker-src blob:;
         connect-src {{csp_source}};
     ">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DuckDB Viewer</title>
-    <script type="module" nonce="{{nonce}}" src="{{toolkit_uri}}"></script>
-    <style>
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        margin: 0;
-        /* --- ADDED PADDING --- */
-        padding: 16px;
-        background-color: var(--vscode-editor-background);
-        color: var(--vscode-editor-foreground);
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-        box-sizing: border-box;
-      }
-      #status-wrapper {
-        padding-bottom: 16px;
-        border-bottom: 1px solid var(--vscode-editorWidget-border);
-        margin-bottom: 16px;
-        flex-shrink: 0;
-      }
-      #status {
-        padding: 4px;
-        border-radius: 4px;
-      }
-      #status.error {
-        background-color: var(--vscode-errorForeground);
-        color: var(--vscode-editor-background);
-      }
-      #controls {
-        display: none;
-        flex-direction: column;
-        gap: 8px;
-        margin-top: 16px;
-        flex-shrink: 0;
-      }
-      #sql-input {
-        width: 100%;
-        min-height: 100px;
-        padding: 8px;
-        border-radius: 4px;
-        border: 1px solid var(--vscode-editorWidget-border);
-        background-color: var(--vscode-editorWidget-background);
-        color: inherit;
-        font-family: 'SFMono-Regular', Consolas, 'Courier New', monospace;
-        resize: vertical;
-      }
-      #run-query {
-        align-self: flex-start;
-        padding: 6px 12px;
-        border: 1px solid var(--vscode-button-border, transparent);
-        border-radius: 4px;
-        background-color: var(--vscode-button-background);
-        color: var(--vscode-button-foreground);
-        cursor: pointer;
-      }
-      #run-query:disabled {
-        opacity: 0.6;
-        cursor: default;
-      }
-      
-      /* --- REPLACED TABLE STYLES --- */
-      #results-container {
-        display: none;
-        overflow: hidden; /* The grid handles its own scrolling */
-        width: 100%;
-        flex-grow: 1;
-      }
-      /* The data grid component styles itself */
-      vscode-data-grid {
-        width: 100%;
-        height: 100%;
-      }
-      /* Add a border around the whole grid */
-      vscode-data-grid {
-        border: 1px solid var(--vscode-editorWidget-border);
-      }
-
-      /* Add the horizontal lines (rows) */
-      vscode-data-grid-row {
-        border-bottom: 1px solid var(--vscode-editorWidget-border);
-      }
-      
-      /* Add the vertical lines (cells) */
-      vscode-data-grid-cell {
-        border-right: 1px solid var(--vscode-editorWidget-border);
-      }
-    </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DuckDB Viewer</title>
+  <script type="module" nonce="{{nonce}}" src="{{toolkit_uri}}"></script>
+  <style>
+    :root {
+      --panel-bg: var(--vscode-editorWidget-background);
+      --panel-border: var(--vscode-editorWidget-border);
+      --muted: var(--vscode-descriptionForeground);
+      --accent: var(--vscode-button-background);
+      --column-header-height: 44px;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: var(--vscode-editor-background);
+      color: var(--vscode-editor-foreground);
+      height: 100vh;
+      display: flex;
+    }
+    .app-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      width: 100%;
+    }
+    #status-wrapper {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 56px;
+    }
+    #status {
+      font-weight: 500;
+      flex: 1;
+    }
+    #status.error {
+      color: var(--vscode-errorForeground);
+    }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-height: 0;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 0;
+    }
+    .panel-heading {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .panel-heading h2 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .panel-heading p {
+      margin: 2px 0 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    #global-search {
+      flex: 1;
+      min-width: 220px;
+      border-radius: 8px;
+      border: 1px solid var(--panel-border);
+      background: var(--vscode-editor-background);
+      color: inherit;
+      padding: 8px 12px;
+    }
+    #results-panel {
+      flex: 1;
+    }
+    #results-container {
+      display: none;
+      flex: 1;
+      border-radius: 10px;
+      border: 1px solid var(--panel-border);
+      overflow: auto;
+      background: var(--vscode-editor-background);
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 13px;
+    }
+    thead th {
+      background: var(--panel-bg);
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid var(--panel-border);
+      padding: 0;
+    }
+    thead .column-row th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    thead .filter-row th {
+      position: sticky;
+      top: var(--column-header-height);
+      z-index: 1;
+      background: var(--panel-bg);
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--panel-border);
+    }
+    tbody tr:nth-child(even) {
+      background: rgba(255, 255, 255, 0.02);
+    }
+    tbody tr:hover {
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .empty-row {
+      text-align: center;
+      font-style: italic;
+      color: var(--muted);
+    }
+    .header-button {
+      width: 100%;
+      background: none;
+      border: none;
+      color: inherit;
+      font: inherit;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      cursor: pointer;
+    }
+    .header-button .sort-indicator {
+      font-size: 10px;
+      color: var(--muted);
+      width: 10px;
+      text-align: right;
+    }
+    .header-button[data-sort="asc"] .sort-indicator::after {
+      content: "▲";
+    }
+    .header-button[data-sort="desc"] .sort-indicator::after {
+      content: "▼";
+    }
+    .filter-row input {
+      width: 100%;
+      border: none;
+      border-top: 1px solid var(--panel-border);
+      padding: 8px 10px;
+      background: rgba(255, 255, 255, 0.02);
+      color: inherit;
+      font-size: 12px;
+    }
+    .filter-row input:focus {
+      outline: 1px solid var(--accent);
+    }
+    .empty-state {
+      padding: 60px 0;
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    #row-count {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    #controls {
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+    #sql-input {
+      width: 100%;
+      min-height: 160px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--panel-border);
+      background-color: var(--vscode-editor-background);
+      color: inherit;
+      font-family: 'SFMono-Regular', Consolas, 'Courier New', monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      resize: vertical;
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.2);
+    }
+    .sql-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    button {
+      border-radius: 8px;
+      border: 1px solid transparent;
+      font-size: 13px;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+    #run-query {
+      background-color: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border-color: var(--vscode-button-border, transparent);
+    }
+    #run-query:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    #copy-sql {
+      background: transparent;
+      color: inherit;
+      border: 1px solid var(--panel-border);
+    }
+    .sql-hints {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .sql-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+  </style>
 </head>
 <body>
+  <div class="app-shell">
     <div id="status-wrapper">
-      <div id="status">Initializing...</div>
-    </div>
-    
-    <div id="results-container">
-      <vscode-data-grid id="results-grid"></vscode-data-grid>
-    </div>
-    
-    <div id="controls">
-      <textarea id="sql-input"></textarea>
-      <button id="run-query">Run Query</button>
+      <div id="status">Initializing…</div>
     </div>
 
-    <script nonce="{{nonce}}" src="{{webview_script_uri}}"></script>
+    <main>
+      <section class="panel" id="results-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Data Preview</h2>
+            <div id="row-count">Awaiting data…</div>
+          </div>
+          <input type="search" id="global-search" placeholder="Search across all columns" />
+        </div>
+        <div id="results-container">
+          <div class="empty-state">Load a file to see the first rows.</div>
+        </div>
+      </section>
+
+      <section class="panel" id="controls">
+        <div class="panel-heading">
+          <h2>SQL Preview</h2>
+          <div class="sql-actions">
+            <button id="copy-sql">Copy SQL</button>
+            <button id="run-query">Run Query</button>
+          </div>
+        </div>
+        <div class="sql-grid">
+          <textarea id="sql-input" placeholder="Type a SQL query. Example: SELECT * FROM my_data LIMIT 50;"></textarea>
+          <div class="sql-hints">Press ⌘+Enter / Ctrl+Enter to run. Changes apply instantly to the preview.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script nonce="{{nonce}}" src="{{webview_script_uri}}"></script>
 </body>
 </html>

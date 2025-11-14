@@ -10,11 +10,32 @@ const controls = document.getElementById('controls');
 const resultsContainer = document.getElementById('results-container');
 const sqlInput = document.getElementById('sql-input') as HTMLTextAreaElement;
 const runButton = document.getElementById('run-query') as HTMLButtonElement;
+const copySqlButton = document.getElementById('copy-sql') as HTMLButtonElement;
 const statusWrapper = document.getElementById('status-wrapper');
+const globalSearchInput = document.getElementById('global-search') as HTMLInputElement;
+const rowCountLabel = document.getElementById('row-count');
+
+type SortDirection = 'asc' | 'desc' | null;
+
+interface TableRow {
+  raw: any[];
+  display: string[];
+}
+
+interface TableData {
+  columns: string[];
+  rows: TableRow[];
+}
 
 let db: duckdb.AsyncDuckDB | null = null;
 let connection: duckdb.AsyncDuckDBConnection | null = null;
-const VIEW_NAME = "my_data"; 
+let viewName = 'my_data';
+let currentTableData: TableData | null = null;
+let columnFilters: string[] = [];
+let globalFilter = '';
+let sortState: { columnIndex: number; direction: SortDirection } = { columnIndex: -1, direction: null };
+let tableBodyElement: HTMLTableSectionElement | null = null;
+let copyTimeoutHandle: number | null = null;
 
 // --- Event Listeners (Moved to top) ---
 
@@ -37,6 +58,41 @@ window.addEventListener('message', (event: any) => {
 runButton.addEventListener('click', () => {
   runQuery(sqlInput.value).catch(reportError);
 });
+
+// Allow Cmd/Ctrl + Enter to run the query
+sqlInput.addEventListener('keydown', (event: KeyboardEvent) => {
+  const isSubmitShortcut = event.key === 'Enter' && (event.metaKey || event.ctrlKey);
+  if (isSubmitShortcut) {
+    event.preventDefault();
+    runQuery(sqlInput.value).catch(reportError);
+  }
+});
+
+// Global search box to filter visible rows
+if (globalSearchInput) {
+  globalSearchInput.addEventListener('input', () => {
+    globalFilter = globalSearchInput.value;
+    applyTableState();
+  });
+}
+
+// Copy SQL to the clipboard for quick sharing
+if (copySqlButton) {
+  copySqlButton.addEventListener('click', async () => {
+    try {
+      const clipboard = navigator.clipboard;
+      if (!clipboard) {
+        updateStatus('Clipboard access is not available in this environment.');
+        return;
+      }
+      await clipboard.writeText(sqlInput.value);
+      flashCopyState();
+    } catch (err) {
+      updateStatus('Copy to clipboard is unavailable in this context.');
+      console.warn('[Webview] Clipboard copy failed', err);
+    }
+  });
+}
 
 // --- Core Functions ---
 
@@ -116,9 +172,9 @@ async function handleFileLoad(fileName: string, fileData: any) {
   await db.registerFileBuffer(fileName, fileBytes); 
   
   // 3. --- NEW DEBUG STEP ---
+  let discoveredColumns: string[] = [];
   try {
-    updateStatus('Debugging: Describing CSV structure...');
-    // We will use header=true to be safe
+    updateStatus('Analyzing CSV structure...');
     const describeQuery = `DESCRIBE SELECT * FROM read_csv('${fileName}', header=true);`;
     console.log(`[Debug] Running query: ${describeQuery}`);
     
@@ -130,8 +186,9 @@ async function handleFileLoad(fileName: string, fileData: any) {
       reportError(`DuckDB's read_csv could not find any columns.`);
       return;
     }
-    
-    renderResults(describeResult);
+    discoveredColumns = describeArray
+      .map((row: any) => row.column_name)
+      .filter((name: any): name is string => typeof name === 'string' && name.length > 0);
 
   } catch (e) {
     reportError(e);
@@ -140,17 +197,21 @@ async function handleFileLoad(fileName: string, fileData: any) {
   // --- END DEBUG STEP ---
   
   // 4. Create a view from the CSV file
-  updateStatus(`Creating view '${VIEW_NAME}' from ${fileName}...`);
+  viewName = generateViewName(fileName);
+  const viewIdentifier = formatIdentifierForSql(viewName);
+  const escapedFileName = fileName.replace(/'/g, "''");
+  updateStatus(`Creating view '${viewName}' from ${fileName}...`);
   const createViewQuery = `
-    CREATE OR REPLACE TEMP VIEW ${VIEW_NAME} AS 
-    SELECT * FROM read_csv('${fileName}', header=true);
+    CREATE OR REPLACE TEMP VIEW ${viewIdentifier} AS 
+    SELECT * FROM read_csv('${escapedFileName}', header=true);
   `;
   console.log(`[Debug] Running query: ${createViewQuery}`);
   await connection.query(createViewQuery);
   
   // 5. Set the default query to select from the VIEW
-  const defaultQuery = `SELECT * FROM ${VIEW_NAME} LIMIT 10;`;
+  const defaultQuery = buildDefaultQuery(discoveredColumns, viewIdentifier);
   sqlInput.value = defaultQuery;
+  sqlInput.placeholder = `Example: ${defaultQuery}`;
   
   // 6. Show the UI
   if (controls) controls.style.display = 'flex';
@@ -190,38 +251,308 @@ async function runQuery(sql: string) {
 }
 
 function renderResults(table: Table | null) {
-  if (!resultsContainer) return;
-  
-  if (!table || table.numRows === 0) {
-    console.log('[Debug] renderResults: Query returned no rows.');
-    resultsContainer.innerHTML = '<p>Query completed. No rows returned.</p>';
+  if (!resultsContainer) {
     return;
   }
 
-  const headers = table.schema.fields.map((field) => field.name);
-  let html = '<table><thead><tr>';
-  html += headers.map(h => `<th>${escapeHtml(h)}</th>`).join('');
-  html += '</tr></thead><tbody>';
+  if (!table || table.numRows === 0) {
+    console.log('[Debug] renderResults: Query returned no rows.');
+    resultsContainer.innerHTML = '<div class="empty-state">Query completed. No rows returned.</div>';
+    currentTableData = null;
+    tableBodyElement = null;
+    updateRowCount(0, 0);
+    return;
+  }
+
+  const rows: TableRow[] = [];
+  const columns = table.schema.fields.map((field) => field.name);
 
   for (let i = 0; i < table.numRows; i++) {
     const row = table.get(i);
     if (!row) continue;
-    
-    html += '<tr>';
+
+    const raw: any[] = [];
+    const display: string[] = [];
     for (const field of table.schema.fields) {
       const value = row[field.name];
-      html += `<td>${escapeHtml(String(value ?? 'NULL'))}</td>`;
+      raw.push(value);
+      display.push(formatCell(value));
     }
-    html += '</tr>';
+    rows.push({ raw, display });
   }
 
-  html += '</tbody></table>';
-  resultsContainer.innerHTML = html;
+  currentTableData = { columns, rows };
+  columnFilters = columns.map(() => '');
+  globalFilter = '';
+  sortState = { columnIndex: -1, direction: null };
+  if (globalSearchInput) {
+    globalSearchInput.value = '';
+  }
+
+  buildTableSkeleton(columns);
+  applyTableState();
+
+  resultsContainer.style.display = 'block';
+  resultsContainer.scrollTop = 0;
+}
+
+function buildTableSkeleton(columns: string[]) {
+  if (!resultsContainer) {
+    return;
+  }
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  headerRow.className = 'column-row';
+
+  columns.forEach((column, index) => {
+    const th = document.createElement('th');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'header-button';
+
+    const label = document.createElement('span');
+    label.textContent = column;
+    const indicator = document.createElement('span');
+    indicator.className = 'sort-indicator';
+
+    button.append(label, indicator);
+    button.addEventListener('click', () => toggleSort(index));
+    th.appendChild(button);
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+
+  const filterRow = document.createElement('tr');
+  filterRow.className = 'filter-row';
+  columns.forEach((column, index) => {
+    const th = document.createElement('th');
+    const input = document.createElement('input');
+    input.type = 'search';
+    input.placeholder = 'Filter';
+    input.value = columnFilters[index] ?? '';
+    input.setAttribute('aria-label', `Filter column ${column}`);
+    input.addEventListener('input', () => {
+      columnFilters[index] = input.value;
+      applyTableState();
+    });
+    th.appendChild(input);
+    filterRow.appendChild(th);
+  });
+  thead.appendChild(filterRow);
+
+  const tbody = document.createElement('tbody');
+  table.appendChild(thead);
+  table.appendChild(tbody);
+
+  resultsContainer.innerHTML = '';
+  resultsContainer.appendChild(table);
+  tableBodyElement = tbody;
+  syncColumnHeaderHeight(headerRow);
+}
+
+function applyTableState() {
+  if (!currentTableData || !tableBodyElement) {
+    return;
+  }
+  const tbody = tableBodyElement;
+
+  const normalizedGlobal = globalFilter.trim().toLowerCase();
+  const normalizedFilters = columnFilters.map((value) => value.trim().toLowerCase());
+
+  let visibleRows = currentTableData.rows.filter((row) => {
+    if (normalizedGlobal) {
+      const hasMatch = row.display.some((cell) => cell.toLowerCase().includes(normalizedGlobal));
+      if (!hasMatch) {
+        return false;
+      }
+    }
+    return normalizedFilters.every((filter, idx) => {
+      if (!filter) return true;
+      return (row.display[idx] ?? '').toLowerCase().includes(filter);
+    });
+  });
+
+  if (sortState.direction && sortState.columnIndex >= 0) {
+    const directionMultiplier = sortState.direction === 'asc' ? 1 : -1;
+    const sortIndex = sortState.columnIndex;
+    visibleRows = [...visibleRows].sort((a, b) => {
+      const comparison = compareValues(
+        a.raw[sortIndex],
+        b.raw[sortIndex],
+        a.display[sortIndex],
+        b.display[sortIndex]
+      );
+      return comparison * directionMultiplier;
+    });
+  } else {
+    visibleRows = [...visibleRows];
+  }
+
+  tbody.innerHTML = '';
+
+  if (visibleRows.length === 0) {
+    const emptyRow = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = currentTableData.columns.length || 1;
+    cell.textContent = 'No rows match the current filters.';
+    cell.className = 'empty-row';
+    emptyRow.appendChild(cell);
+    tbody.appendChild(emptyRow);
+  } else {
+    visibleRows.forEach((row) => {
+      const tr = document.createElement('tr');
+      row.display.forEach((value) => {
+        const td = document.createElement('td');
+        td.textContent = value;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  }
+
+  updateRowCount(visibleRows.length, currentTableData.rows.length);
+  refreshSortIndicators();
+}
+
+function syncColumnHeaderHeight(headerRow: HTMLTableRowElement) {
+  window.requestAnimationFrame(() => {
+    const height = headerRow.getBoundingClientRect().height;
+    if (height > 0) {
+      document.documentElement.style.setProperty('--column-header-height', `${height}px`);
+    }
+  });
+}
+
+function toggleSort(columnIndex: number) {
+  if (sortState.columnIndex === columnIndex) {
+    if (sortState.direction === 'asc') {
+      sortState.direction = 'desc';
+    } else if (sortState.direction === 'desc') {
+      sortState = { columnIndex: -1, direction: null };
+    } else {
+      sortState.direction = 'asc';
+    }
+  } else {
+    sortState = { columnIndex, direction: 'asc' };
+  }
+  applyTableState();
+}
+
+function refreshSortIndicators() {
+  if (!resultsContainer) {
+    return;
+  }
+
+  const headerButtons = Array.from(resultsContainer.querySelectorAll<HTMLButtonElement>('.header-button'));
+  headerButtons.forEach((button, index) => {
+    if (sortState.columnIndex === index && sortState.direction) {
+      button.dataset.sort = sortState.direction;
+    } else {
+      delete button.dataset.sort;
+    }
+  });
+}
+
+function updateRowCount(visible: number, total: number) {
+  if (!rowCountLabel) {
+    return;
+  }
+  if (total === 0) {
+    rowCountLabel.textContent = 'No rows to display.';
+    return;
+  }
+  rowCountLabel.textContent = `Showing ${visible.toLocaleString()} of ${total.toLocaleString()} rows`;
+}
+
+function compareValues(a: any, b: any, aDisplay: string, bDisplay: string): number {
+  if (a === b) return 0;
+
+  const aIsNumber = typeof a === 'number' && Number.isFinite(a);
+  const bIsNumber = typeof b === 'number' && Number.isFinite(b);
+  if (aIsNumber && bIsNumber) {
+    return a < b ? -1 : 1;
+  }
+
+  const aIsDate = a instanceof Date;
+  const bIsDate = b instanceof Date;
+  if (aIsDate && bIsDate) {
+    return a.getTime() - b.getTime();
+  }
+
+  const textA = (aDisplay ?? '').toLowerCase();
+  const textB = (bDisplay ?? '').toLowerCase();
+  return textA.localeCompare(textB, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function formatCell(value: any): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value.toString() : '';
+  }
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function buildDefaultQuery(columnNames: string[], viewReference: string): string {
+  const columns = columnNames.length
+    ? columnNames.map(formatIdentifierForSql).join(', ')
+    : '*';
+  return `SELECT ${columns}\nFROM ${viewReference};`;
+}
+
+function generateViewName(fileName: string): string {
+  const baseName = fileName.split(/[\\/]/).pop() ?? fileName;
+  const withoutExtension = baseName.replace(/\.[^.]+$/, '');
+  let sanitized = withoutExtension.replace(/[^A-Za-z0-9_]/g, '_');
+  if (!sanitized) {
+    sanitized = 'data_view';
+  }
+  if (/^[0-9]/.test(sanitized)) {
+    sanitized = `v_${sanitized}`;
+  }
+  return sanitized;
+}
+
+function formatIdentifierForSql(identifier: string): string {
+  const simplePattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  if (simplePattern.test(identifier)) {
+    return identifier;
+  }
+  return `"${identifier.replace(/"/g, '""')}"`;
 }
 
 // ---
 // Helpers
 // ---
+function flashCopyState() {
+  if (!copySqlButton) {
+    return;
+  }
+  const originalLabel = copySqlButton.textContent ?? 'Copy SQL';
+  copySqlButton.textContent = 'Copied!';
+  copySqlButton.disabled = true;
+  if (copyTimeoutHandle) {
+    window.clearTimeout(copyTimeoutHandle);
+  }
+  copyTimeoutHandle = window.setTimeout(() => {
+    copySqlButton!.textContent = originalLabel;
+    copySqlButton!.disabled = false;
+  }, 1200);
+}
+
 function updateStatus(message: string) {
   // Always make the status bar visible when updating
   if (statusWrapper) {
@@ -250,15 +581,3 @@ function reportError(e: any) {
 // Send the 'ready' signal to the extension to start the handshake
 updateStatus('Webview loaded. Sending "ready" to extension.');
 vscode.postMessage({ command: 'ready' });
-
-function escapeHtml(str: string): string {
-  if (str === null || str === undefined) {
-    return 'NULL';
-  }
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
