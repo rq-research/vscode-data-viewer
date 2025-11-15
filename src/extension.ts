@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as os from 'os';
 
 // The new command ID from package.json
 const COMMAND_ID = 'duckdb-viewer.viewFile';
@@ -67,11 +68,18 @@ export function activate(context: vscode.ExtensionContext) {
               message: e instanceof Error ? e.message : String(e)
             });
           }
+          return;
         }
 
         if (message.command === 'duckdb-ready') {
           duckdbReady = true;
           await deliverPendingFile();
+          return;
+        }
+
+        if (message.command === 'export-data') {
+          await handleExportMessage(message, panel);
+          return;
         }
       },
       undefined,
@@ -82,6 +90,74 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   context.subscriptions.push(disposable);
+}
+
+async function handleExportMessage(message: any, panel: vscode.WebviewPanel) {
+  try {
+    const buffer = message.buffer as ArrayBuffer | number[] | Uint8Array | undefined;
+    if (!buffer) {
+      throw new Error('No export data supplied.');
+    }
+    const bytes = buffer instanceof Uint8Array
+      ? buffer
+      : buffer instanceof ArrayBuffer
+        ? new Uint8Array(buffer)
+        : new Uint8Array(buffer);
+    const fileName = typeof message.fileName === 'string' ? message.fileName : 'duckdb_export';
+    const format = typeof message.format === 'string' ? message.format.toLowerCase() : 'file';
+    const filters = getExportFilters(format);
+    const defaultUri = getDefaultExportUri(fileName);
+    const targetUri = await vscode.window.showSaveDialog({
+      title: 'Save DuckDB export',
+      defaultUri,
+      filters,
+      saveLabel: 'Save',
+    });
+    if (!targetUri) {
+      panel.webview.postMessage({ command: 'export-status', message: 'Export canceled.' });
+      return;
+    }
+    await vscode.workspace.fs.writeFile(targetUri, bytes);
+    panel.webview.postMessage({
+      command: 'export-status',
+      message: `Saved to ${targetUri.fsPath}`,
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    panel.webview.postMessage({
+      command: 'export-status',
+      message: `Export failed: ${errMsg}`,
+    });
+  }
+}
+
+function getDefaultExportUri(fileName: string): vscode.Uri | undefined {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (workspaceFolder) {
+    return vscode.Uri.joinPath(workspaceFolder.uri, fileName);
+  }
+  try {
+    const homedir = os.homedir();
+    if (homedir) {
+      return vscode.Uri.file(path.join(homedir, fileName));
+    }
+  } catch {
+    // ignore
+  }
+  return undefined;
+}
+
+function getExportFilters(format: string): Record<string, string[]> | undefined {
+  if (format === 'csv') {
+    return { CSV: ['csv'] };
+  }
+  if (format === 'parquet') {
+    return { Parquet: ['parquet'] };
+  }
+  if (format === 'arrow') {
+    return { Arrow: ['arrow'] };
+  }
+  return undefined;
 }
 
 // Helper to read a worker file from dist into a string

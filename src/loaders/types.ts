@@ -10,6 +10,7 @@ export interface LoadResult {
   relationName: string;
   relationIdentifier: string;
   columns: string[];
+  schema: { name: string; type: string }[];
 }
 
 export interface DataLoader {
