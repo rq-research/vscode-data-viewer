@@ -256,12 +256,114 @@
       flex-direction: column;
       gap: 8px;
     }
+
+    /* File Discovery Drawer */
+    #file-discovery {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    #file-discovery-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      cursor: pointer;
+      user-select: none;
+      background: var(--panel-bg);
+    }
+    #file-discovery-header:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+    #file-discovery-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+    #file-discovery-arrow {
+      font-size: 10px;
+      color: var(--muted);
+      transition: transform 0.2s;
+    }
+    #file-discovery-arrow.expanded {
+      transform: rotate(90deg);
+    }
+    #file-discovery-count {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: normal;
+    }
+    #file-list-container {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease-out;
+    }
+    #file-list-container.expanded {
+      max-height: 400px;
+      overflow-y: auto;
+      border-top: 1px solid var(--panel-border);
+    }
+    #file-list {
+      padding: 8px;
+    }
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .file-item:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .file-type-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+    }
+    .file-path {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .file-list-empty {
+      padding: 24px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
   <div class="app-shell">
     <div id="status-wrapper">
       <div id="status">Initializing…</div>
+    </div>
+
+    <div id="file-discovery">
+      <div id="file-discovery-header">
+        <div id="file-discovery-title">
+          <span id="file-discovery-arrow">▶</span>
+          <span>Compatible Files</span>
+          <span id="file-discovery-count"></span>
+        </div>
+      </div>
+      <div id="file-list-container">
+        <div id="file-list">
+          <div class="file-list-empty">Searching for compatible files...</div>
+        </div>
+      </div>
     </div>
 
     <main>
