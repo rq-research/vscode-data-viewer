@@ -1,71 +1,114 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { promises as fs } from 'fs';
 
 // The new command ID from package.json
 const COMMAND_ID = 'duckdb-viewer.viewFile';
 
 export function activate(context: vscode.ExtensionContext) {
-  
-  // The command now receives a 'uri' from the right-click menu
-  let disposable = vscode.commands.registerCommand(COMMAND_ID, async (uri: vscode.Uri) => {
-    
-    // Handle if the command is run without a file
-    if (!uri) {
-      vscode.window.showWarningMessage("Please right-click a file from the explorer to use this command.");
-      return;
+  let currentPanel: vscode.WebviewPanel | undefined;
+  let duckdbReady = false;
+  let pendingFile: { uri: vscode.Uri; fileName: string } | null = null;
+
+  async function ensurePanel(): Promise<vscode.WebviewPanel> {
+    if (currentPanel) {
+      return currentPanel;
     }
 
-    const fileName = path.basename(uri.fsPath);
+    duckdbReady = false;
 
     const panel = vscode.window.createWebviewPanel(
       'duckdbDataViewer',
-      `DuckDB: ${fileName}`, // Panel title
+      'DuckDB',
       vscode.ViewColumn.One,
       {
         enableScripts: true,
+        retainContextWhenHidden: true,
         localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')]
       }
     );
 
     panel.webview.html = await getWebviewHtml(context, panel.webview);
 
-    // This is our 2-stage handshake
+    panel.onDidDispose(
+      () => {
+        currentPanel = undefined;
+        duckdbReady = false;
+        pendingFile = null;
+      },
+      undefined,
+      context.subscriptions
+    );
+
     panel.webview.onDidReceiveMessage(
       async (message) => {
-        // Step 1: Webview is ready, send the assets
         if (message.command === 'ready') {
           try {
             const bundles = await prepareDuckDBBundles(context, panel.webview);
             panel.webview.postMessage({ command: 'init', bundles });
           } catch (e) {
-            panel.webview.postMessage({ 
-              command: 'error', 
-              message: e instanceof Error ? e.message : String(e) 
+            panel.webview.postMessage({
+              command: 'error',
+              message: e instanceof Error ? e.message : String(e)
             });
           }
         }
-        
-        // Step 2: DuckDB is initialized, send the file data
+
         if (message.command === 'duckdb-ready') {
-          try {
-            const fileBytes = await vscode.workspace.fs.readFile(uri);
-            panel.webview.postMessage({
-              command: 'loadFile',
-              fileName: fileName,
-              fileData: fileBytes
-            });
-          } catch (e) {
-             panel.webview.postMessage({ 
-              command: 'error', 
-              message: e instanceof Error ? `Failed to read file: ${e.message}` : String(e) 
-            });
-          }
+          duckdbReady = true;
+          await deliverPendingFile();
         }
       },
       undefined,
       context.subscriptions
     );
+
+    currentPanel = panel;
+    return panel;
+  }
+
+  async function deliverPendingFile() {
+    if (!currentPanel || !duckdbReady || !pendingFile) {
+      return;
+    }
+
+    const targetPanel = currentPanel;
+    const { uri, fileName } = pendingFile;
+
+    try {
+      const fileBytes = await vscode.workspace.fs.readFile(uri);
+      targetPanel.webview.postMessage({
+        command: 'loadFile',
+        fileName,
+        fileData: fileBytes
+      });
+    } catch (e) {
+      const message = e instanceof Error ? `Failed to read file: ${e.message}` : String(e);
+      targetPanel.webview.postMessage({
+        command: 'error',
+        message
+      });
+      vscode.window.showErrorMessage(message);
+    } finally {
+      pendingFile = null;
+    }
+  }
+
+  let disposable = vscode.commands.registerCommand(COMMAND_ID, async (uri: vscode.Uri) => {
+    if (!uri) {
+      vscode.window.showWarningMessage('Please right-click a file from the explorer to use this command.');
+      return;
+    }
+
+    const fileName = path.basename(uri.fsPath);
+    pendingFile = { uri, fileName };
+
+    const panel = await ensurePanel();
+    panel.title = `DuckDB: ${fileName}`;
+    panel.reveal(vscode.ViewColumn.One);
+
+    if (duckdbReady) {
+      await deliverPendingFile();
+    }
   });
 
   context.subscriptions.push(disposable);

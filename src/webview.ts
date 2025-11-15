@@ -34,6 +34,7 @@ interface TableData {
 
 let db: duckdb.AsyncDuckDB | null = null;
 let connection: duckdb.AsyncDuckDBConnection | null = null;
+let duckdbInitializationPromise: Promise<void> | null = null;
 let currentTableData: TableData | null = null;
 let columnFilters: string[] = [];
 let globalFilter = '';
@@ -48,7 +49,7 @@ const DATA_LOADERS: DataLoader[] = [arrowLoader, parquetLoader, csvLoader];
 window.addEventListener('message', (event: any) => {
   const message = event.data;
   if (message.command === 'init') {
-    bootstrapDuckDB(message.bundles).catch(reportError);
+    ensureDuckDBInitialized(message.bundles).catch(reportError);
   } else if (message.command === 'loadFile') {
     handleFileLoad(message.fileName, message.fileData).catch(reportError);
   } else if (message.command === 'error') {
@@ -110,6 +111,23 @@ function createDuckDBWorker(workerSource: string, workerUrl: string): { worker: 
       worker: new Worker(blobUrl),
       cleanup: () => URL.revokeObjectURL(blobUrl),
   };
+}
+
+async function ensureDuckDBInitialized(bundles: duckdb.DuckDBBundles) {
+  if (connection) {
+    updateStatus('DuckDB ready. Waiting for file data…');
+    vscode.postMessage({ command: 'duckdb-ready' });
+    return;
+  }
+
+  if (!duckdbInitializationPromise) {
+    duckdbInitializationPromise = bootstrapDuckDB(bundles).catch((error) => {
+      duckdbInitializationPromise = null;
+      throw error;
+    });
+  }
+
+  await duckdbInitializationPromise;
 }
 
 async function bootstrapDuckDB(bundles: duckdb.DuckDBBundles) {
