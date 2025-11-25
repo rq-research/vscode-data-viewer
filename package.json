@@ -42,22 +42,7 @@
     "menus": {
       "explorer/context": [
         {
-          "when": "resourceExtname == .csv",
-          "command": "duckdb-viewer.viewFile",
-          "group": "navigation"
-        },
-        {
-          "when": "resourceExtname == .parquet",
-          "command": "duckdb-viewer.viewFile",
-          "group": "navigation"
-        },
-        {
           "when": "resourceExtname == .sqlite",
-          "command": "duckdb-viewer.viewFile",
-          "group": "navigation"
-        },
-        {
-          "when": "resourceExtname == .arrow",
           "command": "duckdb-viewer.viewFile",
           "group": "navigation"
         }
