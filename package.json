@@ -12,6 +12,27 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "customEditors": [
+      {
+        "viewType": "duckdb-viewer.dataViewer",
+        "displayName": "DuckDB Data Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.csv"
+          },
+          {
+            "filenamePattern": "*.parquet"
+          },
+          {
+            "filenamePattern": "*.parq"
+          },
+          {
+            "filenamePattern": "*.arrow"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
     "commands": [
       {
         "command": "duckdb-viewer.viewFile",
