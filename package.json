@@ -12,6 +12,27 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "customEditors": [
+      {
+        "viewType": "duckdb-viewer.dataViewer",
+        "displayName": "DuckDB Data Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.csv"
+          },
+          {
+            "filenamePattern": "*.parquet"
+          },
+          {
+            "filenamePattern": "*.parq"
+          },
+          {
+            "filenamePattern": "*.arrow"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
     "commands": [
       {
         "command": "duckdb-viewer.viewFile",
@@ -21,22 +42,7 @@
     "menus": {
       "explorer/context": [
         {
-          "when": "resourceExtname == .csv",
-          "command": "duckdb-viewer.viewFile",
-          "group": "navigation"
-        },
-        {
-          "when": "resourceExtname == .parquet",
-          "command": "duckdb-viewer.viewFile",
-          "group": "navigation"
-        },
-        {
           "when": "resourceExtname == .sqlite",
-          "command": "duckdb-viewer.viewFile",
-          "group": "navigation"
-        },
-        {
-          "when": "resourceExtname == .arrow",
           "command": "duckdb-viewer.viewFile",
           "group": "navigation"
         }

@@ -2,33 +2,66 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 
-// The new command ID from package.json
 const COMMAND_ID = 'duckdb-viewer.viewFile';
+const VIEW_TYPE = 'duckdb-viewer.dataViewer';
 
 export function activate(context: vscode.ExtensionContext) {
+  // Register the custom editor provider for auto-opening files
+  const provider = new DuckDBEditorProvider(context);
+  context.subscriptions.push(
+    vscode.window.registerCustomEditorProvider(VIEW_TYPE, provider, {
+      webviewOptions: {
+        retainContextWhenHidden: true,
+      },
+      supportsMultipleEditorsPerDocument: false,
+    })
+  );
+
+  // Keep the command for right-click "Open with DuckDB" option
   const disposable = vscode.commands.registerCommand(COMMAND_ID, async (uri: vscode.Uri) => {
     if (!uri) {
       vscode.window.showWarningMessage('Please right-click a file from the explorer to use this command.');
       return;
     }
+    // Open using the custom editor
+    await vscode.commands.executeCommand('vscode.openWith', uri, VIEW_TYPE);
+  });
 
+  context.subscriptions.push(disposable);
+}
+
+class DuckDBEditorProvider implements vscode.CustomReadonlyEditorProvider {
+  constructor(private readonly context: vscode.ExtensionContext) { }
+
+  async openCustomDocument(
+    uri: vscode.Uri,
+    openContext: vscode.CustomDocumentOpenContext,
+    token: vscode.CancellationToken
+  ): Promise<vscode.CustomDocument> {
+    return {
+      uri,
+      dispose: () => { },
+    };
+  }
+
+  async resolveCustomEditor(
+    document: vscode.CustomDocument,
+    webviewPanel: vscode.WebviewPanel,
+    token: vscode.CancellationToken
+  ): Promise<void> {
+    const uri = document.uri;
     const fileName = path.basename(uri.fsPath);
 
-    const panel = vscode.window.createWebviewPanel(
-      'duckdbDataViewer',
-      `DuckDB: ${fileName}`,
-      vscode.ViewColumn.One,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist')]
-      }
-    );
+    webviewPanel.title = `DuckDB: ${fileName}`;
+    webviewPanel.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'dist')],
+    };
 
     let pendingFile: { uri: vscode.Uri; fileName: string } | null = { uri, fileName };
     let duckdbReady = false;
 
-    panel.webview.html = await getWebviewHtml(context, panel.webview);
+    webviewPanel.webview.html = await getWebviewHtml(this.context, webviewPanel.webview);
 
     const deliverPendingFile = async () => {
       if (!duckdbReady || !pendingFile) {
@@ -39,16 +72,16 @@ export function activate(context: vscode.ExtensionContext) {
 
       try {
         const fileBytes = await vscode.workspace.fs.readFile(fileUri);
-        panel.webview.postMessage({
+        webviewPanel.webview.postMessage({
           command: 'loadFile',
           fileName: pendingFileName,
-          fileData: fileBytes
+          fileData: fileBytes,
         });
       } catch (e) {
         const message = e instanceof Error ? `Failed to read file: ${e.message}` : String(e);
-        panel.webview.postMessage({
+        webviewPanel.webview.postMessage({
           command: 'error',
-          message
+          message,
         });
         vscode.window.showErrorMessage(message);
       } finally {
@@ -56,16 +89,16 @@ export function activate(context: vscode.ExtensionContext) {
       }
     };
 
-    panel.webview.onDidReceiveMessage(
+    webviewPanel.webview.onDidReceiveMessage(
       async (message) => {
         if (message.command === 'ready') {
           try {
-            const bundles = await prepareDuckDBBundles(context, panel.webview);
-            panel.webview.postMessage({ command: 'init', bundles });
+            const bundles = await prepareDuckDBBundles(this.context, webviewPanel.webview);
+            webviewPanel.webview.postMessage({ command: 'init', bundles });
           } catch (e) {
-            panel.webview.postMessage({
+            webviewPanel.webview.postMessage({
               command: 'error',
-              message: e instanceof Error ? e.message : String(e)
+              message: e instanceof Error ? e.message : String(e),
             });
           }
           return;
@@ -78,9 +111,9 @@ export function activate(context: vscode.ExtensionContext) {
           // Send the list of all compatible files in the workspace
           try {
             const compatibleFiles = await discoverCompatibleFiles();
-            panel.webview.postMessage({
+            webviewPanel.webview.postMessage({
               command: 'fileList',
-              files: compatibleFiles
+              files: compatibleFiles,
             });
           } catch (e) {
             console.error('Failed to discover files:', e);
@@ -89,7 +122,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         if (message.command === 'export-data') {
-          await handleExportMessage(message, panel);
+          await handleExportMessage(message, webviewPanel);
           return;
         }
 
@@ -102,13 +135,9 @@ export function activate(context: vscode.ExtensionContext) {
         }
       },
       undefined,
-      context.subscriptions
+      this.context.subscriptions
     );
-
-    panel.reveal(vscode.ViewColumn.One);
-  });
-
-  context.subscriptions.push(disposable);
+  }
 }
 
 async function handleExportMessage(message: any, panel: vscode.WebviewPanel) {
@@ -254,7 +283,7 @@ async function discoverCompatibleFiles(): Promise<Array<{ path: string; relative
       files.push({
         path: fileUri.fsPath,
         relativePath: relativePath,
-        type: ext === 'parq' ? 'parquet' : ext
+        type: ext === 'parq' ? 'parquet' : ext,
       });
     }
   }
@@ -265,4 +294,4 @@ async function discoverCompatibleFiles(): Promise<Array<{ path: string; relative
   return files;
 }
 
-export function deactivate() {}
+export function deactivate() { }

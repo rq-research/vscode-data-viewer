@@ -1,5 +1,5 @@
 import * as duckdb from '@duckdb/duckdb-wasm';
-import { Table, Type, tableToIPC } from 'apache-arrow';
+import { Table, tableToIPC } from 'apache-arrow';
 import { csvLoader } from './loaders/csvLoader';
 import { arrowLoader } from './loaders/arrowLoader';
 import { parquetLoader } from './loaders/parquetLoader';
@@ -22,22 +22,15 @@ const rowCountLabel = document.getElementById('row-count');
 const resetButton = document.getElementById('reset-query') as HTMLButtonElement | null;
 const sqlErrorContainer = document.getElementById('sql-error');
 const historyList = document.getElementById('history-list');
-const schemaList = document.getElementById('schema-list');
-const schemaCountLabel = document.getElementById('schema-count');
-const chartCanvas = document.getElementById('chart-canvas') as HTMLCanvasElement | null;
-const chartEmptyState = document.getElementById('chart-empty');
-const chartColumnSelect = document.getElementById('chart-column') as HTMLSelectElement | null;
-const panelToggleButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-panel-toggle]'));
 const exportButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-export-format]'));
-const historyPanel = document.getElementById('history-panel');
-const insightsPanel = document.getElementById('insights-panel');
-const schemaCard = document.querySelector<HTMLElement>('.schema-card');
-const chartCard = document.querySelector<HTMLElement>('.chart-card');
 const fileDiscoveryHeader = document.getElementById('file-discovery-header');
 const fileDiscoveryArrow = document.getElementById('file-discovery-arrow');
 const fileListContainer = document.getElementById('file-list-container');
 const fileList = document.getElementById('file-list');
 const fileDiscoveryCount = document.getElementById('file-discovery-count');
+const historyButton = document.getElementById('history-button');
+const historyModal = document.getElementById('history-modal');
+const closeHistoryModal = document.getElementById('close-history-modal');
 
 type SortDirection = 'asc' | 'desc' | null;
 
@@ -60,15 +53,7 @@ interface QueryHistoryEntry {
   error?: string;
 }
 
-interface SchemaColumn {
-  name: string;
-  type: string;
-}
-
 type ExportFormat = 'csv' | 'parquet' | 'arrow';
-interface ChartState {
-  column: string;
-}
 
 let db: duckdb.AsyncDuckDB | null = null;
 let connection: duckdb.AsyncDuckDBConnection | null = null;
@@ -83,9 +68,7 @@ const DATA_LOADERS: DataLoader[] = [arrowLoader, parquetLoader, csvLoader];
 let defaultQueryText: string | null = null;
 let queryHistory: QueryHistoryEntry[] = [];
 let nextHistoryId = 1;
-let sourceSchema: SchemaColumn[] = [];
 let lastArrowResult: Table | null = null;
-let chartState: ChartState = { column: '' };
 
 // --- Event Listeners (Moved to top) ---
 async function runQueryWithUiFeedback(sql: string) {
@@ -161,29 +144,6 @@ if (resetButton) {
   });
 }
 
-if (chartColumnSelect) {
-  chartColumnSelect.addEventListener('change', () => {
-    chartState.column = chartColumnSelect.value;
-    renderChart();
-  });
-}
-
-const panelVisibilityState: Record<string, boolean> = {};
-panelToggleButtons.forEach((button) => {
-  const panelId = button.dataset.panelToggle;
-  if (!panelId) {
-    return;
-  }
-  if (!(panelId in panelVisibilityState)) {
-    panelVisibilityState[panelId] = true;
-  }
-  button.addEventListener('click', () => {
-    panelVisibilityState[panelId] = !panelVisibilityState[panelId];
-    applyPanelVisibility(panelId);
-  });
-  applyPanelVisibility(panelId);
-});
-
 exportButtons.forEach((button) => {
   button.addEventListener('click', () => {
     const format = button.dataset.exportFormat as ExportFormat | undefined;
@@ -193,15 +153,29 @@ exportButtons.forEach((button) => {
   });
 });
 
-window.addEventListener('resize', () => {
-  renderChart();
-});
+// History modal controls
+if (historyButton) {
+  historyButton.addEventListener('click', () => {
+    openHistoryModal();
+  });
+}
+
+if (closeHistoryModal) {
+  closeHistoryModal.addEventListener('click', () => {
+    closeHistoryModalWindow();
+  });
+}
+
+if (historyModal) {
+  historyModal.addEventListener('click', (e) => {
+    if (e.target === historyModal) {
+      closeHistoryModalWindow();
+    }
+  });
+}
 
 renderQueryHistory();
-renderSchemaOverview();
-populateChartColumns(null);
 updateResetButtonState();
-renderChart();
 
 // File discovery toggle
 if (fileDiscoveryHeader) {
@@ -227,8 +201,8 @@ function createDuckDBWorker(workerSource: string, workerUrl: string): { worker: 
   const blob = new Blob([bootstrap, '\n', workerSource], { type: 'application/javascript' });
   const blobUrl = URL.createObjectURL(blob);
   return {
-      worker: new Worker(blobUrl),
-      cleanup: () => URL.revokeObjectURL(blobUrl),
+    worker: new Worker(blobUrl),
+    cleanup: () => URL.revokeObjectURL(blobUrl),
   };
 }
 
@@ -253,34 +227,34 @@ async function bootstrapDuckDB(bundles: duckdb.DuckDBBundles) {
   try {
     updateStatus('Selecting DuckDB bundle...');
     const selectedBundle = await duckdb.selectBundle(bundles);
-    
+
     if (!selectedBundle.mainWorker || typeof selectedBundle.mainWorker !== 'string') {
-        throw new Error('Selected bundle has no worker source.');
+      throw new Error('Selected bundle has no worker source.');
     }
     if (!selectedBundle.mainModule) {
-        throw new Error('Selected bundle has no WASM module URL.');
+      throw new Error('Selected bundle has no WASM module URL.');
     }
 
     const workerUrl = selectedBundle.mainModule.replace('.wasm', '.worker.js');
     const { worker, cleanup } = createDuckDBWorker(selectedBundle.mainWorker, workerUrl);
-    
+
     const logger = new duckdb.ConsoleLogger();
     db = new duckdb.AsyncDuckDB(logger, worker);
-    
+
     updateStatus('Instantiating DuckDB...');
     await db.instantiate(selectedBundle.mainModule, selectedBundle.pthreadWorker);
     cleanup();
-    
+
     updateStatus('Opening DuckDB...');
     await db.open({ path: ':memory:' });
-    
+
     updateStatus('Connecting to DuckDB...');
     connection = await db.connect();
-    
+
     updateStatus('Installing extensions...');
     await connection.query("INSTALL parquet; LOAD parquet;");
     await connection.query("INSTALL sqlite; LOAD sqlite;");
-  
+
     updateStatus('DuckDB ready. Waiting for file data…');
     vscode.postMessage({ command: 'duckdb-ready' });
 
@@ -311,12 +285,14 @@ async function handleFileLoad(fileName: string, fileData: any) {
   sqlInput.value = defaultQuery;
   sqlInput.placeholder = `Example: ${defaultQuery}`;
   defaultQueryText = defaultQuery;
-  sourceSchema = loadResult.schema ?? [];
-  renderSchemaOverview();
   updateResetButtonState();
 
-  if (controls) controls.style.display = 'flex';
-  if (resultsContainer) resultsContainer.style.display = 'block';
+  if (controls) {
+    controls.style.display = 'flex';
+  }
+  if (resultsContainer) {
+    resultsContainer.style.display = 'block';
+  }
 
   await runQueryWithUiFeedback(defaultQuery);
 }
@@ -400,8 +376,6 @@ function renderResults(table: Table | null) {
     tableBodyElement = null;
     updateRowCount(0, 0);
     lastArrowResult = table;
-    populateChartColumns(null);
-    renderChart();
     return;
   }
 
@@ -411,7 +385,9 @@ function renderResults(table: Table | null) {
 
   for (let i = 0; i < table.numRows; i++) {
     const row = table.get(i);
-    if (!row) continue;
+    if (!row) {
+      continue;
+    }
 
     const raw: any[] = [];
     const display: string[] = [];
@@ -430,9 +406,6 @@ function renderResults(table: Table | null) {
   if (globalSearchInput) {
     globalSearchInput.value = '';
   }
-
-  populateChartColumns(table);
-  renderChart();
 
   buildTableSkeleton(columns);
   applyTableState();
@@ -514,7 +487,9 @@ function applyTableState() {
       }
     }
     return normalizedFilters.every((filter, idx) => {
-      if (!filter) return true;
+      if (!filter) {
+        return true;
+      }
       return (row.display[idx] ?? '').toLowerCase().includes(filter);
     });
   });
@@ -616,7 +591,9 @@ function updateRowCount(visible: number, total: number) {
 }
 
 function compareValues(a: any, b: any, aDisplay: string, bDisplay: string): number {
-  if (a === b) return 0;
+  if (a === b) {
+    return 0;
+  }
 
   const aIsNumber = typeof a === 'number' && Number.isFinite(a);
   const bIsNumber = typeof b === 'number' && Number.isFinite(b);
@@ -665,7 +642,7 @@ function renderQueryHistory() {
     return;
   }
   if (queryHistory.length === 0) {
-    historyList.innerHTML = '<div class="empty-state subtle">Run a query to build a history timeline.</div>';
+    historyList.innerHTML = '<div class="history-empty">No queries executed yet. Run a query to see it here.</div>';
     return;
   }
 
@@ -682,13 +659,10 @@ function renderQueryHistory() {
         classes.push('error');
       }
       return `
-        <article class="${classes.join(' ')}">
+        <article class="${classes.join(' ')}" data-history-id="${entry.id}">
           <div class="history-body">
             <div class="history-sql">${escapeHtml(entry.sql)}</div>
             <div class="history-meta">${entry.error ? escapeHtml(entry.error) + ' • ' : ''}${meta}</div>
-          </div>
-          <div class="history-actions">
-            <button class="secondary" data-history-id="${entry.id}">Run again</button>
           </div>
         </article>
       `;
@@ -696,243 +670,34 @@ function renderQueryHistory() {
     .join('');
 
   historyList.innerHTML = items;
-  historyList.querySelectorAll<HTMLButtonElement>('button[data-history-id]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const id = Number(button.dataset.historyId);
-      const entry = queryHistory.find((item) => item.id === id);
+  historyList.querySelectorAll<HTMLElement>('.history-item').forEach((item) => {
+    item.addEventListener('click', () => {
+      const id = Number(item.dataset.historyId);
+      const entry = queryHistory.find((e) => e.id === id);
       if (entry) {
         sqlInput.value = entry.sql;
+        closeHistoryModalWindow();
         runQueryWithUiFeedback(entry.sql);
       }
     });
   });
 }
 
+function openHistoryModal() {
+  if (historyModal) {
+    historyModal.classList.add('visible');
+  }
+}
+
+function closeHistoryModalWindow() {
+  if (historyModal) {
+    historyModal.classList.remove('visible');
+  }
+}
+
 function updateResetButtonState() {
   if (resetButton) {
     resetButton.disabled = !defaultQueryText;
-  }
-}
-
-function describeFieldType(field: { type?: { toString?: () => string }; typeId?: Type }): string {
-  if (!field) {
-    return 'unknown';
-  }
-  if (field.type && typeof field.type.toString === 'function') {
-    return field.type.toString();
-  }
-  return field.typeId !== undefined ? Type[field.typeId] ?? 'unknown' : 'unknown';
-}
-
-function isIntegerField(field: { typeId?: Type }): boolean {
-  if (field?.typeId === undefined) {
-    return false;
-  }
-  const integerTypes: Type[] = [
-    Type.Int,
-    Type.Int8,
-    Type.Int16,
-    Type.Int32,
-    Type.Int64,
-    Type.Uint8,
-    Type.Uint16,
-    Type.Uint32,
-    Type.Uint64,
-  ];
-  return integerTypes.includes(field.typeId);
-}
-
-function isNumericField(field: { typeId?: Type }): boolean {
-  if (field?.typeId === undefined) {
-    return false;
-  }
-  const numericTypes: Type[] = [
-    Type.Int,
-    Type.Int8,
-    Type.Int16,
-    Type.Int32,
-    Type.Int64,
-    Type.Uint8,
-    Type.Uint16,
-    Type.Uint32,
-    Type.Uint64,
-    Type.Float,
-    Type.Float16,
-    Type.Float32,
-    Type.Float64,
-    Type.Decimal,
-  ];
-  return numericTypes.includes(field.typeId);
-}
-
-function renderSchemaOverview() {
-  if (!schemaList) {
-    return;
-  }
-  if (!sourceSchema.length) {
-    schemaList.innerHTML = '<div class="empty-state subtle">Schema information will appear after the source file loads.</div>';
-    if (schemaCountLabel) {
-      schemaCountLabel.textContent = '';
-    }
-    return;
-  }
-
-  const rows = sourceSchema
-    .map((column) => `<div class="schema-row"><span>${escapeHtml(column.name)}</span><span class="muted">${escapeHtml(column.type)}</span></div>`)
-    .join('');
-  schemaList.innerHTML = rows;
-  if (schemaCountLabel) {
-    schemaCountLabel.textContent = `${sourceSchema.length} cols`;
-  }
-}
-
-function populateChartColumns(table: Table | null) {
-  if (!chartColumnSelect) {
-    return;
-  }
-  const fields = table ? table.schema.fields.filter(isNumericField) : [];
-  chartColumnSelect.innerHTML = '';
-  chartColumnSelect.disabled = fields.length === 0;
-  if (fields.length === 0) {
-    chartState.column = '';
-    chartColumnSelect.value = '';
-    renderChart();
-    return;
-  }
-  fields.forEach((field) => {
-    const option = document.createElement('option');
-    option.value = field.name;
-    option.textContent = field.name;
-    chartColumnSelect.appendChild(option);
-  });
-
-  if (!fields.some((field) => field.name === chartState.column)) {
-    const preferred = fields.find(isIntegerField) ?? fields[0];
-    chartState.column = preferred?.name ?? '';
-  }
-  if (!chartState.column && fields[0]) {
-    chartState.column = fields[0].name;
-  }
-  chartColumnSelect.value = chartState.column;
-}
-
-function renderChart() {
-  if (!chartCanvas) {
-    return;
-  }
-  if (!currentTableData) {
-    toggleChartEmptyState('Run a query to visualize data.');
-    return;
-  }
-  if (!chartState.column) {
-    const message = chartColumnSelect?.disabled
-      ? 'No numeric columns available for charting.'
-      : 'Pick a numeric column to start charting.';
-    toggleChartEmptyState(message);
-    return;
-  }
-
-  const columnIndex = currentTableData.columns.indexOf(chartState.column);
-  if (columnIndex === -1) {
-    toggleChartEmptyState('Selected column is not in the current result.');
-    return;
-  }
-
-  const points = currentTableData.rows
-    .map((row, idx) => {
-      const value = Number(row.raw[columnIndex]);
-      if (!Number.isFinite(value)) {
-        return null;
-      }
-      const label = `Row ${idx + 1}`;
-      return { label, value };
-    })
-    .filter((point): point is { label: string; value: number } => point !== null);
-
-  if (!points.length) {
-    toggleChartEmptyState('No numeric values available for the selected column.');
-    return;
-  }
-
-  const ctx = chartCanvas.getContext('2d');
-  if (!ctx) {
-    return;
-  }
-
-  const styles = getComputedStyle(document.body);
-  const accent = styles.getPropertyValue('--accent') || '#0098ff';
-  const muted = styles.getPropertyValue('--muted') || '#888';
-  const border = styles.getPropertyValue('--panel-border') || '#555';
-
-  if (chartEmptyState) {
-    chartEmptyState.style.display = 'none';
-  }
-  chartCanvas.style.display = 'block';
-
-  const width = chartCanvas.clientWidth || 420;
-  const height = chartCanvas.clientHeight || 260;
-  const dpr = window.devicePixelRatio || 1;
-  chartCanvas.width = width * dpr;
-  chartCanvas.height = height * dpr;
-  ctx.save();
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, width, height);
-
-  const paddingLeft = 64;
-  const paddingRight = 24;
-  const paddingTop = 24;
-  const paddingBottom = 36;
-  const chartWidth = width - paddingLeft - paddingRight;
-  const chartHeight = height - paddingTop - paddingBottom;
-  const values = points.map((point) => point.value);
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
-  const valueRange = maxValue - minValue || 1;
-
-  ctx.strokeStyle = border;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(paddingLeft, height - paddingBottom);
-  ctx.lineTo(width - paddingRight, height - paddingBottom);
-  ctx.moveTo(paddingLeft, paddingTop);
-  ctx.lineTo(paddingLeft, height - paddingBottom);
-  ctx.stroke();
-
-  const tickCount = 4;
-  ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-  ctx.fillStyle = muted;
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  for (let i = 0; i <= tickCount; i++) {
-    const ratio = i / tickCount;
-    const value = maxValue - ratio * valueRange;
-    const y = paddingTop + ratio * chartHeight;
-    ctx.beginPath();
-    ctx.moveTo(paddingLeft - 4, y);
-    ctx.lineTo(paddingLeft, y);
-    ctx.stroke();
-    ctx.fillText(value.toLocaleString(), paddingLeft - 8, y);
-  }
-
-  const barWidth = chartWidth / points.length;
-  ctx.fillStyle = accent;
-  points.forEach((point, index) => {
-    const x = paddingLeft + index * barWidth + barWidth * 0.1;
-    const barHeight = ((point.value - minValue) / valueRange) * chartHeight;
-    const y = paddingTop + (chartHeight - barHeight);
-    ctx.fillRect(x, y, barWidth * 0.8, barHeight);
-  });
-
-  ctx.restore();
-}
-
-function toggleChartEmptyState(message: string) {
-  if (chartEmptyState) {
-    chartEmptyState.textContent = message;
-    chartEmptyState.style.display = 'flex';
-  }
-  if (chartCanvas) {
-    chartCanvas.style.display = 'none';
   }
 }
 
@@ -1024,31 +789,6 @@ function clearSqlError() {
   }
   sqlErrorContainer.textContent = '';
   sqlErrorContainer.classList.remove('visible');
-}
-
-function applyPanelVisibility(panelId: string) {
-  const visible = panelVisibilityState[panelId];
-  const button = panelToggleButtons.find((btn) => btn.dataset.panelToggle === panelId);
-  if (button) {
-    button.setAttribute('aria-pressed', visible ? 'true' : 'false');
-  }
-
-  if (panelId === 'history' && historyPanel) {
-    historyPanel.classList.toggle('hidden', !visible);
-  }
-  if (panelId === 'schema' && schemaCard) {
-    schemaCard.style.display = visible ? '' : 'none';
-  }
-  if (panelId === 'chart' && chartCard) {
-    chartCard.style.display = visible ? '' : 'none';
-  }
-
-  if (insightsPanel) {
-    const schemaVisible = panelVisibilityState['schema'] !== false;
-    const chartVisible = panelVisibilityState['chart'] !== false;
-    const insightsVisible = schemaVisible || chartVisible;
-    insightsPanel.classList.toggle('hidden', !insightsVisible);
-  }
 }
 
 // ---
